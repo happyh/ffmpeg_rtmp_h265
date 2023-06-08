@@ -28,7 +28,6 @@
 #include "libavutil/avstring.h"
 #include "libavutil/channel_layout.h"
 #include "libavutil/dict.h"
-#include "libavutil/dict_internal.h"
 #include "libavutil/opt.h"
 #include "libavutil/internal.h"
 #include "libavutil/intfloat.h"
@@ -38,6 +37,7 @@
 #include "demux.h"
 #include "internal.h"
 #include "flv.h"
+#include "hevc.h"
 
 #define VALIDATE_INDEX_TS_THRESH 2500
 
@@ -147,9 +147,9 @@ static void add_keyframes_index(AVFormatContext *s)
     if (ffstream(stream)->nb_index_entries == 0) {
         for (i = 0; i < flv->keyframe_count; i++) {
             av_log(s, AV_LOG_TRACE, "keyframe filepositions = %"PRId64" times = %"PRId64"\n",
-                   flv->keyframe_filepositions[i], flv->keyframe_times[i]);
+                   flv->keyframe_filepositions[i], flv->keyframe_times[i] * 1000);
             av_add_index_entry(stream, flv->keyframe_filepositions[i],
-                flv->keyframe_times[i], 0, 0, AVINDEX_KEYFRAME);
+                flv->keyframe_times[i] * 1000, 0, 0, AVINDEX_KEYFRAME);
         }
     } else
         av_log(s, AV_LOG_WARNING, "Skipping duplicate index\n");
@@ -517,7 +517,6 @@ static int parse_keyframes_index(AVFormatContext *s, AVIOContext *ioc, int64_t m
            amf_get_string(ioc, str_val, sizeof(str_val)) > 0) {
         int64_t **current_array;
         unsigned int arraylen;
-        int factor;
 
         // Expect array object in context
         if (avio_r8(ioc) != AMF_DATA_TYPE_ARRAY)
@@ -530,12 +529,10 @@ static int parse_keyframes_index(AVFormatContext *s, AVIOContext *ioc, int64_t m
         if       (!strcmp(KEYFRAMES_TIMESTAMP_TAG , str_val) && !times) {
             current_array = &times;
             timeslen      = arraylen;
-            factor = 1000;
         } else if (!strcmp(KEYFRAMES_BYTEOFFSET_TAG, str_val) &&
                    !filepositions) {
             current_array = &filepositions;
             fileposlen    = arraylen;
-            factor = 1;
         } else
             // unexpected metatag inside keyframes, will not use such
             // metadata for indexing
@@ -550,8 +547,10 @@ static int parse_keyframes_index(AVFormatContext *s, AVIOContext *ioc, int64_t m
             double d;
             if (avio_r8(ioc) != AMF_DATA_TYPE_NUMBER)
                 goto invalid;
-            d = av_int2double(avio_rb64(ioc)) * factor;
+            d = av_int2double(avio_rb64(ioc));
             if (isnan(d) || d < INT64_MIN || d > INT64_MAX)
+                goto invalid;
+            if (current_array == &times && (d <= INT64_MIN / 1000 || d >= INT64_MAX / 1000))
                 goto invalid;
             if (avio_feof(ioc))
                 goto invalid;
@@ -568,7 +567,7 @@ static int parse_keyframes_index(AVFormatContext *s, AVIOContext *ioc, int64_t m
     if (timeslen == fileposlen && fileposlen>1 && max_pos <= filepositions[0]) {
         for (i = 0; i < FFMIN(2,fileposlen); i++) {
             flv->validate_index[i].pos = filepositions[i];
-            flv->validate_index[i].dts = times[i];
+            flv->validate_index[i].dts = times[i] * 1000;
             flv->validate_count        = i + 1;
         }
         flv->keyframe_times = times;
@@ -1334,7 +1333,7 @@ retry_duration:
             avcodec_parameters_free(&par);
         }
     } else if (stream_type == FLV_STREAM_TYPE_VIDEO) {
-        int ret = flv_set_video_codec(s, st, flags, 1);
+        int ret = flv_set_video_codec(s, st, flags & FLV_VIDEO_CODECID_MASK, 1);
         if (ret < 0)
             return ret;
         size -= ret;
